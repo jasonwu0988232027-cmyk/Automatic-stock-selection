@@ -5,7 +5,7 @@ import pandas_ta as ta
 import time
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="AI 產業權值百科 v13", layout="wide")
+st.set_page_config(page_title="產業權值百科 v13", layout="wide")
 
 # --- 1. 股票靜態字典 (全產業清單) ---
 STOCK_DICT = {
