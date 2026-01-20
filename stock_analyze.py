@@ -4,108 +4,133 @@ import pandas as pd
 import pandas_ta as ta
 import time
 
-# --- 配置 ---
-st.set_page_config(page_title="AI 選股助手 v10", layout="wide")
+# --- 網頁配置 ---
+st.set_page_config(page_title="AI 產業龍頭偵測器", layout="wide")
 
-# --- 股票池 ---
-TW_LIST = [
-    "2330.TW", "2454.TW", "2317.TW", "2308.TW", "2382.TW", "2412.TW", "2881.TW", "2882.TW", 
-    "2603.TW", "2002.TW", "1101.TW", "0050.TW", "0056.TW", "00878.TW", "00632R.TW"
-] # 測試時建議先用精簡版，確認成功後再手動加回前面的長清單
+# --- 1. 股票數據庫 ---
+TW_STOCKS = [
+    "2330.TW", "2454.TW", "2303.TW", "3711.TW", "2379.TW", "3034.TW", "2337.TW", "2408.TW", "6770.TW", "3532.TW",
+    "2317.TW", "2308.TW", "2382.TW", "2357.TW", "2324.TW", "3231.TW", "2356.TW", "4938.TW", "2395.TW", "3008.TW",
+    "2881.TW", "2882.TW", "2886.TW", "2891.TW", "2884.TW", "5880.TW", "2880.TW", "2885.TW", "2892.TW", "2883.TW",
+    "2603.TW", "2609.TW", "2615.TW", "2618.TW", "2610.TW", "2605.TW", "5608.TW",
+    "1301.TW", "1303.TW", "1326.TW", "6505.TW", "1304.TW",
+    "2002.TW", "2014.TW", "1101.TW", "1102.TW", "2542.TW", "1802.TW", "2501.TW",
+    "1216.TW", "2912.TW", "2727.TW", "2707.TW", "9943.TW", "1227.TW", "2207.TW",
+    "1760.TW", "4147.TW", "6472.TW", "1752.TW", "1795.TW",
+    "2412.TW", "3045.TW", "4904.TW", "8926.TW",
+    "0050.TW", "006208.TW", "0056.TW", "00878.TW", "00919.TW", 
+    "00713.TW", "00929.TW", "00940.TW", "00632R.TW", "00631L.TW"
+]
+US_STOCKS = ["AAPL", "NVDA", "TSLA", "AMD", "MSFT", "GOOGL", "META", "AMZN"]
 
-US_LIST = ["AAPL", "NVDA", "TSLA", "AMD", "MSFT"]
+# --- 2. 側邊欄控制 ---
+st.sidebar.title("🛠️ 策略微調")
 
-# --- 側邊欄 ---
-st.sidebar.title("🛠️ 策略參數")
-market = st.sidebar.selectbox("市場", ["TW", "US", "BOTH"])
-total_budget = st.sidebar.number_input("預算", value=1000000)
-auto_threshold = st.sidebar.slider("推薦門檻", 10, 100, 30)
+with st.sidebar.expander("📊 權重設定", expanded=True):
+    w_rsi = st.slider("RSI 超賣權重", 0, 100, 40)
+    w_ma = st.slider("MA 金叉權重", 0, 100, 30)
+    w_volatility = st.slider("劇烈波動權重", 0, 100, 20)
+    w_volume = st.slider("成交爆量權重", 0, 100, 10)
+    total_w = w_rsi + w_ma + w_volatility + w_volume
 
-with st.sidebar.expander("📊 權重設定"):
-    w_rsi = st.slider("RSI超賣", 0, 100, 40)
-    w_ma = st.slider("MA金叉", 0, 100, 30)
-    w_vol = st.slider("大波動", 0, 100, 20)
-    w_vxx = st.slider("爆量", 0, 100, 10)
+market_choice = st.sidebar.selectbox("掃描市場", ["TW", "BOTH", "US"])
+top_n_input = st.sidebar.text_input("推薦數量 (留空則自動)", "")
+total_budget = st.sidebar.number_input("總預算", value=1000000)
+auto_threshold = st.sidebar.slider("推薦門檻 (分)", 0, total_w, 30) # 調低預設門檻避免無訊號
 
-# --- 分析函數 ---
-def analyze_stock(ticker):
+# --- 3. 穩定分析引擎 ---
+@st.cache_data(ttl=600)
+def analyze_stock(ticker, weights):
     try:
-        # 1. 抓取歷史數據 (100天)
+        # 下載數據
         df = yf.download(ticker, period="100d", interval="1d", progress=False, auto_adjust=True)
-        if df.empty or len(df) < 20: return None
+        if df.empty or len(df) < 30: return None
         
-        # 2. 欄位清洗 (處理 Multi-Index)
+        # 修正欄位結構
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 3. 指標計算
+        # 指標計算
         df['RSI'] = ta.rsi(df['Close'], length=14)
         df['MA5'] = ta.sma(df['Close'], length=5)
         df['MA10'] = ta.sma(df['Close'], length=10)
 
-        # 4. 取最新值 (使用 .iloc[-1] 確保是標量)
-        curr = df.iloc[-1]
-        prev = df.iloc[-2]
-        
-        c_price = float(curr['Close'])
-        p_price = float(prev['Close'])
-        c_rsi = float(curr['RSI'])
-        chg = ((c_price - p_price) / p_price) * 100
-        
-        # 5. 計分
+        # 關鍵加固：確保取出的值是 float 標量
+        last_price = float(df['Close'].iloc[-1])
+        prev_price = float(df['Close'].iloc[-2])
+        last_rsi = float(df['RSI'].iloc[-1])
+        last_ma5 = float(df['MA5'].iloc[-1])
+        last_ma10 = float(df['MA10'].iloc[-1])
+        prev_ma5 = float(df['MA5'].iloc[-2])
+        prev_ma10 = float(df['MA10'].iloc[-2])
+        last_vol = float(df['Volume'].iloc[-1])
+        avg_vol = float(df['Volume'].mean())
+
         score = 0
         reasons = []
-        if c_rsi < 30: # 稍微放寬門檻
-            score += w_rsi; reasons.append("RSI超賣")
-        if float(prev['MA5']) < float(prev['MA10']) and float(curr['MA5']) > float(curr['MA10']):
-            score += w_ma; reasons.append("MA金叉")
-        if abs(chg) > (9.5 if ".TW" in ticker else 7.0):
-            score += w_vol; reasons.append(f"波動({round(chg,1)}%)")
-        if float(curr['Volume']) > df['Volume'].mean() * 1.5:
-            score += w_vxx; reasons.append("爆量")
+
+        # RSI 判斷 (解決 Series 模糊問題)
+        if last_rsi < 20:
+            score += weights['rsi']
+            reasons.append("RSI超賣")
+        
+        # MA 金叉判斷
+        if prev_ma5 < prev_ma10 and last_ma5 > last_ma10:
+            score += weights['ma']
+            reasons.append("MA金叉")
+        
+        # 漲跌幅判斷
+        change_pct = ((last_price - prev_price) / prev_price) * 100
+        limit = 9.5 if ".TW" in ticker else 7.0
+        if abs(change_pct) >= limit:
+            score += weights['volatility']
+            reasons.append(f"大波動({round(change_pct,1)}%)")
+            
+        # 爆量判斷
+        if last_vol > avg_vol * 2:
+            score += weights['volume']
+            reasons.append("爆量")
+
+        # 獲取名稱
+        name = yf.Ticker(ticker).info.get('shortName', ticker)
 
         if score > 0:
             return {
-                "名稱": ticker, # 為了穩定性先用代碼代替名稱抓取
+                "股票名稱": name,
+                "代碼": ticker,
                 "總分": score,
-                "現價": round(c_price, 2),
-                "漲跌": f"{round(chg, 2)}%",
-                "訊號": " + ".join(reasons)
+                "現價": round(last_price, 2),
+                "漲跌": f"{round(change_pct,2)}%",
+                "訊號": " + ".join(reasons),
+                "raw_score": score
             }
-    except Exception as e:
-        st.write(f"⚠️ {ticker} 數據異常: {e}")
+    except:
         return None
 
-# --- 主程式 ---
-st.title("🤖 AI 選股助手 v10.0")
+# --- 4. 執行與顯示 ---
+st.title("🏆 AI 產業龍頭選股助手 v9.0")
 
-if st.button("🚀 開始全自動掃描"):
-    target = TW_LIST if market == "TW" else (US_LIST if market == "US" else TW_LIST + US_LIST)
+if st.button("🚀 開始穩定掃描"):
+    target = TW_STOCKS if market_choice == "TW" else (US_STOCKS if market_choice == "US" else TW_STOCKS + US_STOCKS)
+    weights = {'rsi': w_rsi, 'ma': w_ma, 'volatility': w_volatility, 'volume': w_volume}
     
     results = []
-    progress = st.progress(0)
+    bar = st.progress(0)
     
-    # 使用 st.empty 建立動態日誌區
-    log_area = st.empty()
-
-    for idx, t in enumerate(target):
-        log_area.text(f"正在掃描 ({idx+1}/{len(target)}): {t}")
-        data = analyze_stock(t)
-        if data:
-            results.append(data)
-        progress.progress((idx + 1) / len(target))
-        time.sleep(0.2) # 加入微小延遲防止被 Yahoo 封鎖
-
-    log_area.empty()
+    for i, t in enumerate(target):
+        res = analyze_stock(t, weights)
+        if res: results.append(res)
+        bar.progress((i + 1) / len(target))
 
     if results:
-        res_df = pd.DataFrame(results).sort_values("總分", ascending=False)
-        final = res_df[res_df['總分'] >= auto_threshold]
+        df = pd.DataFrame(results).sort_values("raw_score", ascending=False)
+        top_n = int(top_n_input) if top_n_input.isdigit() else None
+        final = df.head(top_n) if top_n else df[df['raw_score'] >= auto_threshold]
         
         if not final.empty:
-            st.success(f"找到 {len(final)} 檔符合條件標的！")
-            st.dataframe(final, use_container_width=True)
+            st.success(f"掃描完畢！符合門檻的股票共 {len(final)} 檔。")
+            st.dataframe(final.drop(columns=['raw_score']), use_container_width=True)
         else:
-            st.info(f"掃描完畢，但無股票超過門檻 ({auto_threshold}分)。最高分為: {res_df.iloc[0]['總分']}")
+            st.warning(f"掃描完成，但最高分為 {df.iloc[0]['raw_score']}，未達門檻 {auto_threshold}。請嘗試調低側邊欄門檻。")
     else:
-        st.error("❌ 掃描失敗：未獲取到任何有效數據。請檢查您的網路或 yfinance 是否需要更新。")
+        st.error("掃描異常，請確認網路連接或 Ticker 清單正確性。")
