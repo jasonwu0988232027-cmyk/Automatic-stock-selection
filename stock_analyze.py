@@ -5,9 +5,9 @@ import pandas_ta as ta
 import time
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="AI 自定義選股偵測器", layout="wide")
+st.set_page_config(page_title="AI 產業龍頭偵測器", layout="wide")
 
-# --- 1. 擴充版股票數據庫 (70+ 檔) ---
+# --- 1. 股票數據庫 ---
 TW_STOCKS = [
     "2330.TW", "2454.TW", "2303.TW", "3711.TW", "2379.TW", "3034.TW", "2337.TW", "2408.TW", "6770.TW", "3532.TW",
     "2317.TW", "2308.TW", "2382.TW", "2357.TW", "2324.TW", "3231.TW", "2356.TW", "4938.TW", "2395.TW", "3008.TW",
@@ -23,10 +23,10 @@ TW_STOCKS = [
 ]
 US_STOCKS = ["AAPL", "NVDA", "TSLA", "AMD", "MSFT", "GOOGL", "META", "AMZN"]
 
-# --- 2. 側邊欄：權重與基本設定 ---
-st.sidebar.title("🛠️ AI 策略控制台")
+# --- 2. 側邊欄控制 ---
+st.sidebar.title("🛠️ 策略微調")
 
-with st.sidebar.expander("📊 權重占比設定", expanded=True):
+with st.sidebar.expander("📊 權重設定", expanded=True):
     w_rsi = st.slider("RSI 超賣權重", 0, 100, 40)
     w_ma = st.slider("MA 金叉權重", 0, 100, 30)
     w_volatility = st.slider("劇烈波動權重", 0, 100, 20)
@@ -34,99 +34,51 @@ with st.sidebar.expander("📊 權重占比設定", expanded=True):
     total_w = w_rsi + w_ma + w_volatility + w_volume
 
 market_choice = st.sidebar.selectbox("掃描市場", ["TW", "BOTH", "US"])
-top_n_input = st.sidebar.text_input("推薦數量 (留空則依門檻自動)", "")
-total_budget = st.sidebar.number_input("總投資預算", value=1000000)
-auto_threshold = st.sidebar.slider("自動模式門檻 (分)", 10, total_w, int(total_w*0.5))
+top_n_input = st.sidebar.text_input("推薦數量 (留空則自動)", "")
+total_budget = st.sidebar.number_input("總預算", value=1000000)
+auto_threshold = st.sidebar.slider("推薦門檻 (分)", 0, total_w, 30) # 調低預設門檻避免無訊號
 
-# --- 3. 核心分析引擎 (加入名稱抓取) ---
-@st.cache_data(ttl=3600)
+# --- 3. 穩定分析引擎 ---
+@st.cache_data(ttl=600)
 def analyze_stock(ticker, weights):
     try:
-        # 抓取數據與基本資訊
-        stock_obj = yf.Ticker(ticker)
-        # 優先抓取 shortName (中文名或英文短名)
-        stock_name = stock_obj.info.get('shortName', ticker)
-        
+        # 下載數據
         df = yf.download(ticker, period="100d", interval="1d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 30: return None
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        
+        # 修正欄位結構
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         # 指標計算
         df['RSI'] = ta.rsi(df['Close'], length=14)
         df['MA5'] = ta.sma(df['Close'], length=5)
         df['MA10'] = ta.sma(df['Close'], length=10)
 
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        curr_p = float(last['Close'])
-        change_pct = ((curr_p - float(prev['Close'])) / float(prev['Close'])) * 100
+        # 關鍵加固：確保取出的值是 float 標量
+        last_price = float(df['Close'].iloc[-1])
+        prev_price = float(df['Close'].iloc[-2])
+        last_rsi = float(df['RSI'].iloc[-1])
+        last_ma5 = float(df['MA5'].iloc[-1])
+        last_ma10 = float(df['MA10'].iloc[-1])
+        prev_ma5 = float(df['MA5'].iloc[-2])
+        prev_ma10 = float(df['MA10'].iloc[-2])
+        last_vol = float(df['Volume'].iloc[-1])
+        avg_vol = float(df['Volume'].mean())
 
         score = 0
         reasons = []
 
-        if float(last['RSI']) < 20:
-            score += weights['rsi']; reasons.append("RSI超賣")
-        if float(prev['MA5']) < float(prev['MA10']) and float(last['MA5']) > float(last['MA10']):
-            score += weights['ma']; reasons.append("MA金叉")
+        # RSI 判斷 (解決 Series 模糊問題)
+        if last_rsi < 20:
+            score += weights['rsi']
+            reasons.append("RSI超賣")
         
+        # MA 金叉判斷
+        if prev_ma5 < prev_ma10 and last_ma5 > last_ma10:
+            score += weights['ma']
+            reasons.append("MA金叉")
+        
+        # 漲跌幅判斷
+        change_pct = ((last_price - prev_price) / prev_price) * 100
         limit = 9.5 if ".TW" in ticker else 7.0
-        if abs(change_pct) >= limit:
-            score += weights['volatility']; reasons.append(f"劇烈波動({round(change_pct,1)}%)")
-        if float(last['Volume']) > df['Volume'].mean() * 2:
-            score += weights['volume']; reasons.append("成交爆量")
-
-        if score > 0:
-            return {
-                "股票名稱": stock_name,
-                "代碼": ticker,
-                "總分": score,
-                "現價": round(curr_p, 2),
-                "今日漲跌": f"{round(change_pct, 2)}%",
-                "訊號": " + ".join(reasons)
-            }
-    except: return None
-
-# --- 4. 主程式執行 ---
-st.title("🏆 AI 全產業自定義選股助手")
-
-if st.button("🚀 開始執行全產業名稱校準掃描"):
-    target_list = TW_STOCKS if market_choice == "TW" else (US_STOCKS if market_choice == "US" else TW_STOCKS + US_STOCKS)
-    current_weights = {'rsi': w_rsi, 'ma': w_ma, 'volatility': w_volatility, 'volume': w_volume}
-    
-    results = []
-    bar = st.progress(0)
-    status = st.empty()
-
-    for i, t in enumerate(target_list):
-        status.text(f"🔍 掃描中: {t} ({i+1}/{len(target_list)})")
-        res = analyze_stock(t, current_weights)
-        if res: results.append(res)
-        bar.progress((i + 1) / len(target_list))
-
-    status.success("✅ 掃描與名稱對照完成！")
-
-    if results:
-        df_res = pd.DataFrame(results).sort_values("總分", ascending=False)
-        top_n = int(top_n_input) if top_n_input.isdigit() else None
-        final_df = df_res.head(top_n) if top_n else df_res[df_res['總分'] >= auto_threshold]
-        
-        if not final_df.empty:
-            alloc = total_budget / len(final_df)
-            final_df['建議量'] = final_df.apply(lambda x: f"{int(alloc/x['現價']//1000)} 張" if ".TW" in x['代碼'] else f"{int(alloc/x['現價'])} 股", axis=1)
-            final_df['停損價'] = (final_df['現價'] * 0.93).round(2)
-
-            # 避險提醒
-            if any("00632R" in str(x) for x in final_df['代碼']):
-                st.error("🚨 警告：避險標的「元大台灣50反1」分數達標，市場風險轉強！")
-            
-            # --- 顯示漂亮表格 ---
-            st.subheader("📍 AI 選股推薦名單 (按總分排序)")
-            
-            # 調整欄位順序：名稱排第一
-            cols = ["股票名稱", "代碼", "總分", "現價", "今日漲跌", "建議量", "停損價", "訊號"]
-            st.dataframe(final_df[cols], use_container_width=True)
-            st.balloons()
-        else:
-            st.warning(f"沒有股票達到門檻分數 ({auto_threshold})。")
-    else:
-        st.warning("市場無訊號。")
