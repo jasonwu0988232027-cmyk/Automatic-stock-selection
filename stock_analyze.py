@@ -82,3 +82,55 @@ def analyze_stock(ticker, weights):
         # 漲跌幅判斷
         change_pct = ((last_price - prev_price) / prev_price) * 100
         limit = 9.5 if ".TW" in ticker else 7.0
+        if abs(change_pct) >= limit:
+            score += weights['volatility']
+            reasons.append(f"大波動({round(change_pct,1)}%)")
+            
+        # 爆量判斷
+        if last_vol > avg_vol * 2:
+            score += weights['volume']
+            reasons.append("爆量")
+
+        # 獲取名稱
+        name = yf.Ticker(ticker).info.get('shortName', ticker)
+
+        if score > 0:
+            return {
+                "股票名稱": name,
+                "代碼": ticker,
+                "總分": score,
+                "現價": round(last_price, 2),
+                "漲跌": f"{round(change_pct,2)}%",
+                "訊號": " + ".join(reasons),
+                "raw_score": score
+            }
+    except:
+        return None
+
+# --- 4. 執行與顯示 ---
+st.title("🏆 AI 產業龍頭選股助手 v9.0")
+
+if st.button("🚀 開始穩定掃描"):
+    target = TW_STOCKS if market_choice == "TW" else (US_STOCKS if market_choice == "US" else TW_STOCKS + US_STOCKS)
+    weights = {'rsi': w_rsi, 'ma': w_ma, 'volatility': w_volatility, 'volume': w_volume}
+    
+    results = []
+    bar = st.progress(0)
+    
+    for i, t in enumerate(target):
+        res = analyze_stock(t, weights)
+        if res: results.append(res)
+        bar.progress((i + 1) / len(target))
+
+    if results:
+        df = pd.DataFrame(results).sort_values("raw_score", ascending=False)
+        top_n = int(top_n_input) if top_n_input.isdigit() else None
+        final = df.head(top_n) if top_n else df[df['raw_score'] >= auto_threshold]
+        
+        if not final.empty:
+            st.success(f"掃描完畢！符合門檻的股票共 {len(final)} 檔。")
+            st.dataframe(final.drop(columns=['raw_score']), use_container_width=True)
+        else:
+            st.warning(f"掃描完成，但最高分為 {df.iloc[0]['raw_score']}，未達門檻 {auto_threshold}。請嘗試調低側邊欄門檻。")
+    else:
+        st.error("掃描異常，請確認網路連接或 Ticker 清單正確性。")
